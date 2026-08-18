@@ -1,0 +1,12 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: trustee-backend
+  namespace: trustee-system
+spec:
+  dnsNames:
+    - trustee-backend.example.invalid
+  issuerRef:
+    kind: ClusterIssuer
+    name: REPLACE_ME
+  secretName: trustee-backend-tls

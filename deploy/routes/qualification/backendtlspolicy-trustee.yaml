@@ -1,0 +1,13 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: BackendTLSPolicy
+metadata:
+  name: trustee-guest
+  namespace: trustee-system
+spec:
+  targetRefs:
+    - group: ""
+      kind: Service
+      name: trustee-guest
+  validation:
+    hostname: trustee-backend.qualification.example.invalid
+    wellKnownCACertificates: System

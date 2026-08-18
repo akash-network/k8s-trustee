@@ -1,0 +1,22 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: trustee-allow-public-gateway
+  namespace: trustee-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: trustee
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              ocl.network/role: edge
+          podSelector:
+            matchLabels:
+              ocl.network/trustee-ingress: "true"
+      ports:
+        - protocol: TCP
+          port: 8080

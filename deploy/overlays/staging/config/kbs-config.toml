@@ -1,0 +1,56 @@
+session_storage_type = "Postgres"
+require_scoped_resource_policy = true
+
+[http_server]
+sockets = ["0.0.0.0:8080"]
+insecure_http = false
+private_key = "/run/trustee/tls/tls.key"
+certificate = "/run/trustee/tls/tls.crt"
+tls_profile = "intermediate"
+
+[attestation_token]
+trusted_certs_paths = ["/run/trustee/token/attestation-token-root-ca.pem"]
+insecure_header_jwk = false
+
+[attestation_service]
+type = "coco_as_builtin"
+
+[attestation_service.attestation_token_broker]
+duration_min = 5
+issuer_name = "https://kbs.staging.example.invalid/attestation"
+verbose_token = false
+
+[attestation_service.attestation_token_broker.signer]
+key_path = "/run/trustee/token/attestation-token.key"
+cert_path = "/run/trustee/token/attestation-token-chain.pem"
+
+[attestation_service.rvps_config]
+type = "BuiltIn"
+
+[attestation_service.verifier_config.nvidia_verifier]
+type = "Local"
+
+[attestation_service.verifier_config.snp_verifier]
+vcek_sources = [{ type = "KDS" }]
+
+[admin]
+authorization_mode = "AuthenticatedAuthorization"
+
+[admin.authentication.bearer_jwt]
+identity_providers = [
+  { issuer = "https://identity.staging.example.invalid/", audience = "ocl-trustee-admin", jwk_set_uri = "https://identity.staging.example.invalid/.well-known/jwks.json" }
+]
+
+[admin.authorization.regex_acl]
+acls = [
+  { role = "trustee-provisioner", allowed_endpoints = "^/kbs/v0/(resource(?:/.*)?|resource-policy(?:/.*)?|attestation-policy|reference-value(?:/.*)?)$" }
+]
+
+[storage_backend]
+storage_type = "Postgres"
+
+[storage_backend.backends.postgres]
+
+[[plugins]]
+name = "resource"
+storage_backend_type = "kvstorage"

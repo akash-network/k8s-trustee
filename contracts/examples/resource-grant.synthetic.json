@@ -1,0 +1,28 @@
+{
+  "version": "v1",
+  "workload": {
+    "owner": "akash1synthetic000000000000000000000000000000",
+    "dseq": "1",
+    "gseq": 1,
+    "oseq": 1,
+    "service": "example",
+    "replica": 0
+  },
+  "expectation": {
+    "initdataSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "cpuTee": "snp",
+    "gpu": {
+      "architecture": "blackwell",
+      "count": 2
+    }
+  },
+  "resources": [
+    {
+      "repository": "synthetic-lease",
+      "type": "volume-key",
+      "tag": "data-v1",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ],
+  "expiresAt": "2030-01-01T00:00:00Z"
+}

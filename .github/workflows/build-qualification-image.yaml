@@ -1,0 +1,185 @@
+name: Build qualification Trustee image
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out deployment source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: deployment
+          persist-credentials: false
+
+      - name: Read qualification lock
+        id: lock
+        working-directory: deployment
+        run: |
+          set -euo pipefail
+          python3 scripts/readiness.py validate qualification
+
+          release_value() {
+            awk -F= -v key="$1" '
+              $1 == key {
+                sub(/^[^=]*=/, "")
+                print
+                found = 1
+              }
+              END { if (!found) exit 1 }
+            ' releases/qualification.env
+          }
+
+          image_repository=$(release_value TRUSTEE_IMAGE_REPOSITORY)
+          source_revision=$(release_value TRUSTEE_SOURCE_REVISION)
+          upstream_revision=$(release_value TRUSTEE_UPSTREAM_BASE_REVISION)
+          repository_owner=$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+
+          if [[ ! $image_repository =~ ^ghcr\.io/[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._/-]*$ ]] ||
+            [[ $image_repository != "ghcr.io/$repository_owner/"* ]]; then
+            printf 'qualification image must use this repository owner on GHCR\n' >&2
+            exit 1
+          fi
+
+          {
+            printf 'image_repository=%s\n' "$image_repository"
+            printf 'source_revision=%s\n' "$source_revision"
+            printf 'upstream_revision=%s\n' "$upstream_revision"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Check out locked Trustee source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: akash-network/trustee
+          ref: ${{ steps.lock.outputs.source_revision }}
+          fetch-depth: 0
+          path: trustee-source
+          persist-credentials: false
+
+      - name: Verify source ancestry
+        working-directory: deployment
+        run: >-
+          scripts/verify-source-lock.sh qualification
+          "$GITHUB_WORKSPACE/trustee-source"
+
+      - name: Create isolated Buildx builder
+        id: builder
+        run: |
+          set -euo pipefail
+          builder="qualification-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker buildx create --name "$builder" --driver docker-container --use
+          docker buildx inspect --bootstrap
+          printf 'name=%s\n' "$builder" >>"$GITHUB_OUTPUT"
+
+      - name: Sign in to GHCR
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          printf '%s' "$REGISTRY_TOKEN" |
+          docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Build locked image for verification
+        env:
+          SOURCE_REVISION: ${{ steps.lock.outputs.source_revision }}
+          UPSTREAM_REVISION: ${{ steps.lock.outputs.upstream_revision }}
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --platform linux/amd64 \
+            --file deployment/images/trustee/Dockerfile \
+            --build-arg BUILDPLATFORM=linux/amd64 \
+            --build-arg TARGETPLATFORM=linux/amd64 \
+            --label org.opencontainers.image.source=https://github.com/akash-network/trustee \
+            --label org.opencontainers.image.revision="$SOURCE_REVISION" \
+            --label io.akash.trustee.deployment-revision="$GITHUB_SHA" \
+            --label io.akash.trustee.upstream-revision="$UPSTREAM_REVISION" \
+            --tag "localhost/trustee-qualification-smoke:$SOURCE_REVISION" \
+            --load \
+            trustee-source
+
+      - name: Exercise the qualification runtime
+        env:
+          SOURCE_REVISION: ${{ steps.lock.outputs.source_revision }}
+        run: >-
+          TRUSTEE_IMAGE="localhost/trustee-qualification-smoke:$SOURCE_REVISION"
+          deployment/scripts/image-smoke.sh
+
+      - name: Build and publish locked image
+        id: image
+        env:
+          IMAGE_REPOSITORY: ${{ steps.lock.outputs.image_repository }}
+          SOURCE_REVISION: ${{ steps.lock.outputs.source_revision }}
+          UPSTREAM_REVISION: ${{ steps.lock.outputs.upstream_revision }}
+        run: |
+          set -euo pipefail
+          tag="$IMAGE_REPOSITORY:qualification-$GITHUB_SHA-$SOURCE_REVISION"
+          metadata="$RUNNER_TEMP/qualification-image-metadata.json"
+
+          docker buildx build \
+            --platform linux/amd64 \
+            --file deployment/images/trustee/Dockerfile \
+            --build-arg BUILDPLATFORM=linux/amd64 \
+            --build-arg TARGETPLATFORM=linux/amd64 \
+            --label org.opencontainers.image.source=https://github.com/akash-network/trustee \
+            --label org.opencontainers.image.revision="$SOURCE_REVISION" \
+            --label io.akash.trustee.deployment-revision="$GITHUB_SHA" \
+            --label io.akash.trustee.upstream-revision="$UPSTREAM_REVISION" \
+            --provenance=mode=max \
+            --sbom=true \
+            --metadata-file "$metadata" \
+            --tag "$tag" \
+            --push \
+            trustee-source
+
+          digest=$(jq -er '.["containerimage.digest"]' "$metadata")
+          if [[ ! $digest =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            printf 'build did not return an OCI manifest digest\n' >&2
+            exit 1
+          fi
+          printf 'digest=%s\n' "$digest" >>"$GITHUB_OUTPUT"
+          printf 'tag=%s\n' "$tag" >>"$GITHUB_OUTPUT"
+
+      - name: Exercise the published digest
+        env:
+          DIGEST: ${{ steps.image.outputs.digest }}
+          IMAGE_REPOSITORY: ${{ steps.lock.outputs.image_repository }}
+        run: |
+          set -euo pipefail
+          docker pull "$IMAGE_REPOSITORY@$DIGEST"
+          TRUSTEE_IMAGE="$IMAGE_REPOSITORY@$DIGEST" \
+            deployment/scripts/image-smoke.sh
+
+      - name: Record immutable output
+        env:
+          DIGEST: ${{ steps.image.outputs.digest }}
+          IMAGE_REPOSITORY: ${{ steps.lock.outputs.image_repository }}
+          SOURCE_REVISION: ${{ steps.lock.outputs.source_revision }}
+          UPSTREAM_REVISION: ${{ steps.lock.outputs.upstream_revision }}
+        run: |
+          # Backticks below are Markdown delimiters, not command substitutions.
+          # shellcheck disable=SC2016
+          {
+            printf '## Qualification Trustee image\n\n'
+            printf -- '- Repository: `%s`\n' "$IMAGE_REPOSITORY"
+            printf -- '- Digest: `%s`\n' "$DIGEST"
+            printf -- '- Akash source: `%s`\n' "$SOURCE_REVISION"
+            printf -- '- Canonical upstream base: `%s`\n' "$UPSTREAM_REVISION"
+            printf -- '- Deployment source: `%s`\n' "$GITHUB_SHA"
+            printf '\nA separate reviewed change must copy the digest into the qualification lock.\n'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Remove registry credentials and builder
+        if: always()
+        env:
+          BUILDER: ${{ steps.builder.outputs.name }}
+        run: |
+          docker logout ghcr.io || true
+          if [[ -n $BUILDER ]]; then
+            docker buildx rm "$BUILDER" || true
+          fi

@@ -1,0 +1,52 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+  - certificate-trustee-backend.yaml
+  - dopplersecret-trustee.yaml
+  - networkpolicy-allow-postgres.yaml
+configMapGenerator:
+  - name: trustee-config
+    namespace: trustee-system
+    files:
+      - kbs-config.toml=config/kbs-config.toml
+images:
+  - name: trustee-image
+    newName: ghcr.io/akash-network/trustee
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+patches:
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: trustee
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: trustee
+      spec:
+        template:
+          spec:
+            containers:
+              - name: trustee
+                env:
+                  - name: RUST_LOG
+                    value: info
+                volumeMounts:
+                  - name: postgres-ca
+                    $patch: delete
+            volumes:
+              - name: postgres-ca
+                $patch: delete
+  - target:
+      group: networking.k8s.io
+      version: v1
+      kind: NetworkPolicy
+      name: trustee-allow-provisioner
+    patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: trustee-allow-provisioner
