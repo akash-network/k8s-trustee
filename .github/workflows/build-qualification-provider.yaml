@@ -149,6 +149,7 @@ jobs:
           CONTEXT: ${{ steps.context.outputs.path }}
         run: |
           set -euo pipefail
+          export AP_ROOT=$PWD
           source .env
           image="localhost/provider-qualification:${PROVIDER_SOURCE_REVISION}"
           docker buildx build \
@@ -179,6 +180,7 @@ jobs:
           CONTEXT: ${{ steps.context.outputs.path }}
         run: |
           set -euo pipefail
+          export AP_ROOT=$PWD
           source .env
           image="ghcr.io/akash-network/provider:qualification-${PROVIDER_SOURCE_REVISION}"
           metadata="$RUNNER_TEMP/provider-image-metadata.json"
