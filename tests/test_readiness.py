@@ -338,6 +338,25 @@ class QualificationOverlayTests(unittest.TestCase):
         ):
             self.assertIn(pattern, ignored)
 
+    def test_provider_image_publish_is_manual_and_source_locked(self) -> None:
+        workflow = (
+            self.root / ".github/workflows/build-qualification-provider.yaml"
+        ).read_text()
+        self.assertIn("workflow_dispatch:", workflow)
+        self.assertNotIn("pull_request:", workflow)
+        self.assertNotRegex(workflow, r"(?m)^\s{2}push:")
+        self.assertIn(
+            "f3615afebae63a07253ec1ced1f94c4917aac47d", workflow
+        )
+        self.assertIn(
+            "05480ad820365d635048ba2564c5e64accd8f090", workflow
+        )
+        self.assertIn("merge-base --is-ancestor", workflow)
+        self.assertIn("Smoke-test the published digest", workflow)
+        self.assertIn("--provenance=mode=max", workflow)
+        self.assertIn("--sbom=true", workflow)
+        self.assertNotIn(":latest", workflow)
+
     def test_qualification_image_contains_only_builtin_kbs_features(self) -> None:
         dockerfile = (self.root / "images/trustee/Dockerfile").read_text()
         workflow = (

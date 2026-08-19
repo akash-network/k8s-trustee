@@ -1,0 +1,238 @@
+name: Build qualification Provider image
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    env:
+      PROVIDER_SOURCE_REVISION: f3615afebae63a07253ec1ced1f94c4917aac47d
+      PROVIDER_TEE_REVISION: 23354d05f23e6eb1135337e2934b904cda550842
+      PROVIDER_CONFIDENTIAL_REVISION: 40eb24c3130849ed015e679bfe5eaed725d25ba8
+      CHAIN_SDK_REVISION: 05480ad820365d635048ba2564c5e64accd8f090
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out deployment source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: deployment
+          persist-credentials: false
+
+      - name: Check out locked Provider source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: akash-network/provider
+          ref: ${{ env.PROVIDER_SOURCE_REVISION }}
+          fetch-depth: 0
+          path: provider-source
+          persist-credentials: false
+
+      - name: Check out locked chain-sdk source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: akash-network/chain-sdk
+          ref: ${{ env.CHAIN_SDK_REVISION }}
+          path: chain-sdk-source
+          persist-credentials: false
+
+      - name: Verify source lock
+        run: |
+          set -euo pipefail
+          provider_root="$GITHUB_WORKSPACE/provider-source"
+          chain_root="$GITHUB_WORKSPACE/chain-sdk-source"
+
+          [[ $(git -C "$provider_root" rev-parse HEAD) == "$PROVIDER_SOURCE_REVISION" ]]
+          [[ $(git -C "$chain_root" rev-parse HEAD) == "$CHAIN_SDK_REVISION" ]]
+          git -C "$provider_root" merge-base --is-ancestor \
+            "$PROVIDER_TEE_REVISION" "$PROVIDER_SOURCE_REVISION"
+          git -C "$provider_root" merge-base --is-ancestor \
+            "$PROVIDER_CONFIDENTIAL_REVISION" "$PROVIDER_SOURCE_REVISION"
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            coreutils \
+            direnv \
+            g++ \
+            gcc \
+            jq \
+            libudev-dev \
+            lz4 \
+            make \
+            pkg-config \
+            pv \
+            unzip \
+            wget
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: provider-source/go.mod
+          cache-dependency-path: provider-source/go.sum
+          cache: true
+
+      - name: Verify committed chain-sdk module sums
+        working-directory: provider-source
+        run: |
+          set -euo pipefail
+          for module in pkg.akt.dev/go pkg.akt.dev/go/sdl; do
+            version=$(go mod edit -json | jq -er \
+              --arg module "$module" \
+              '.Require[] | select(.Path == $module) | .Version')
+            if [[ $version != *-05480ad82036 ]]; then
+              printf '%s does not pin the qualification chain-sdk revision\n' "$module" >&2
+              exit 1
+            fi
+            archive_count=$(awk -v module="$module" -v version="$version" \
+              '$1 == module && $2 == version { count++ } END { print count + 0 }' \
+              go.sum)
+            metadata_count=$(awk -v module="$module" -v version="$version/go.mod" \
+              '$1 == module && $2 == version { count++ } END { print count + 0 }' \
+              go.sum)
+            if [[ $archive_count != 1 || $metadata_count != 1 ]]; then
+              printf 'go.sum does not lock %s %s\n' "$module" "$version" >&2
+              exit 1
+            fi
+          done
+
+      - name: Compose the locked Provider workspace
+        run: |
+          set -euo pipefail
+          provider_root="$GITHUB_WORKSPACE/provider-source"
+          chain_root="$GITHUB_WORKSPACE/chain-sdk-source"
+          workspace_dir="$RUNNER_TEMP/provider-workspace"
+          install -d -m 0755 "$workspace_dir"
+          cd "$workspace_dir"
+          GOWORK=off go work init "$provider_root"
+          go work edit \
+            -replace="pkg.akt.dev/go=$chain_root/go" \
+            -replace="pkg.akt.dev/go/sdl=$chain_root/go/sdl" \
+            -replace="github.com/cosmos/cosmos-sdk=github.com/akash-network/cosmos-sdk@v0.53.7-akash.2" \
+            -replace="github.com/gogo/protobuf=github.com/cosmos/gogoproto@v1.3.3-alpha.regen.1"
+          printf 'GOWORK=%s/go.work\n' "$workspace_dir" >>"$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Build Provider and prepare isolated image context
+        id: context
+        working-directory: provider-source
+        run: |
+          set -euo pipefail
+          export AP_ROOT=$PWD
+          set -a
+          source .env
+          set +a
+          export AKASH_DIRENV_SET=1
+          export GOTOOLCHAIN
+          GOTOOLCHAIN=$(./script/tools.sh gotoolchain)
+          export PROVIDER_SERVICES="$AP_DEVCACHE_BIN/provider-services"
+
+          make provider-services
+
+          context="$RUNNER_TEMP/provider-image"
+          install -d -m 0755 "$context"
+          install -m 0644 Dockerfile "$context/Dockerfile"
+          install -m 0755 "$PROVIDER_SERVICES" "$context/provider-services"
+          printf 'path=%s\n' "$context" >>"$GITHUB_OUTPUT"
+
+      - name: Build and smoke-test without publishing
+        working-directory: provider-source
+        env:
+          CONTEXT: ${{ steps.context.outputs.path }}
+        run: |
+          set -euo pipefail
+          source .env
+          image="localhost/provider-qualification:${PROVIDER_SOURCE_REVISION}"
+          docker buildx build \
+            --platform linux/amd64 \
+            --build-arg "GRPCURL_VERSION=$GRPCURL_VERSION" \
+            --build-arg "GRPCURL_SHA256_AMD64=$GRPCURL_SHA256_AMD64" \
+            --build-arg "GRPCURL_SHA256_ARM64=$GRPCURL_SHA256_ARM64" \
+            --label org.opencontainers.image.source=https://github.com/akash-network/provider \
+            --label "org.opencontainers.image.revision=$PROVIDER_SOURCE_REVISION" \
+            --label "io.akash.provider.chain-sdk-revision=$CHAIN_SDK_REVISION" \
+            --label "io.akash.provider.deployment-revision=$GITHUB_SHA" \
+            --tag "$image" \
+            --load \
+            "$CONTEXT"
+          docker run --rm --entrypoint /usr/bin/provider-services "$image" version
+
+      - name: Sign in to GHCR
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish immutable qualification image
+        id: publish
+        working-directory: provider-source
+        env:
+          CONTEXT: ${{ steps.context.outputs.path }}
+        run: |
+          set -euo pipefail
+          source .env
+          image="ghcr.io/akash-network/provider:qualification-${PROVIDER_SOURCE_REVISION}"
+          metadata="$RUNNER_TEMP/provider-image-metadata.json"
+          docker buildx build \
+            --platform linux/amd64 \
+            --build-arg "GRPCURL_VERSION=$GRPCURL_VERSION" \
+            --build-arg "GRPCURL_SHA256_AMD64=$GRPCURL_SHA256_AMD64" \
+            --build-arg "GRPCURL_SHA256_ARM64=$GRPCURL_SHA256_ARM64" \
+            --label org.opencontainers.image.source=https://github.com/akash-network/provider \
+            --label "org.opencontainers.image.revision=$PROVIDER_SOURCE_REVISION" \
+            --label "io.akash.provider.chain-sdk-revision=$CHAIN_SDK_REVISION" \
+            --label "io.akash.provider.deployment-revision=$GITHUB_SHA" \
+            --provenance=mode=max \
+            --sbom=true \
+            --metadata-file "$metadata" \
+            --tag "$image" \
+            --push \
+            "$CONTEXT"
+
+          digest=$(jq -er '.["containerimage.digest"]' "$metadata")
+          if [[ ! $digest =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            printf 'build did not return an OCI manifest digest\n' >&2
+            exit 1
+          fi
+          printf 'digest=%s\n' "$digest" >>"$GITHUB_OUTPUT"
+          printf 'image=%s\n' "$image" >>"$GITHUB_OUTPUT"
+
+      - name: Smoke-test the published digest
+        env:
+          DIGEST: ${{ steps.publish.outputs.digest }}
+          IMAGE: ${{ steps.publish.outputs.image }}
+        run: |
+          set -euo pipefail
+          image_ref="$IMAGE@$DIGEST"
+          docker pull "$image_ref" >/dev/null
+          docker run --rm --entrypoint /usr/bin/provider-services \
+            "$image_ref" version
+          help=$(docker run --rm --entrypoint /usr/bin/provider-services \
+            "$image_ref" run --help)
+          grep -Fq -- '--cc-kbs-url' <<<"$help"
+          grep -Fq -- '--cc-persistent-storage-classes' <<<"$help"
+
+      - name: Record immutable output
+        env:
+          DIGEST: ${{ steps.publish.outputs.digest }}
+          IMAGE: ${{ steps.publish.outputs.image }}
+        run: |
+          # Backticks below are Markdown delimiters, not command substitutions.
+          # shellcheck disable=SC2016
+          {
+            printf '## Qualification Provider image\n\n'
+            printf -- '- Image: `%s`\n' "$IMAGE"
+            printf -- '- Digest: `%s`\n' "$DIGEST"
+            printf -- '- Provider source: `%s`\n' "$PROVIDER_SOURCE_REVISION"
+            printf -- '- chain-sdk source: `%s`\n' "$CHAIN_SDK_REVISION"
+            printf -- '- Deployment source: `%s`\n' "$GITHUB_SHA"
+            printf '\nNo release, Git tag, or mutable image tag was created.\n'
+          } >>"$GITHUB_STEP_SUMMARY"
