@@ -182,7 +182,7 @@ jobs:
           set -euo pipefail
           export AP_ROOT=$PWD
           source .env
-          image="ghcr.io/akash-network/provider:qualification-${PROVIDER_SOURCE_REVISION}"
+          image="ghcr.io/akash-network/provider-qualification:qualification-${PROVIDER_SOURCE_REVISION}"
           metadata="$RUNNER_TEMP/provider-image-metadata.json"
           docker buildx build \
             --platform linux/amd64 \
