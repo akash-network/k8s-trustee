@@ -132,6 +132,7 @@ jobs:
           export AKASH_DIRENV_SET=1
           export GOTOOLCHAIN
           GOTOOLCHAIN=$(./script/tools.sh gotoolchain)
+          export AKASH="$AP_DEVCACHE_BIN/akash"
           export PROVIDER_SERVICES="$AP_DEVCACHE_BIN/provider-services"
 
           make provider-services
