@@ -13,7 +13,7 @@ configMapGenerator:
 images:
   - name: trustee-image
     newName: ghcr.io/akash-network/trustee
-    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+    digest: sha256:7650e39f907540d6e04769e925cb276a5e3a061d2427ca04771f8a1ae13c2db4
 patches:
   - target:
       group: apps
